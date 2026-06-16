@@ -9,18 +9,12 @@
 
 
 /*============================================================
- * KP (King-Piece) Evaluation tables
+ * Evaluation tables
  *
- * Always compiled. Toggled at runtime via use_kp_eval param.
+ * Single-pass eval; toggled via use_kp_eval (positional extras).
  *============================================================*/
 
-// KP material (10x scale for fine positional granularity)
-static const int kp_material[7] = {0, 20, 60, 70, 80, 200, 1000};
-
-// Material-only (simple scale)
-static const int simple_material[7] = {0, 2, 6, 7, 8, 20, 100};
-
-// Piece-Square Tables (white perspective, mirror for black)
+// Piece-Square Tables (white perspective; mirror row for black)
 static const int pst[6][BOARD_H][BOARD_W] = {
     // Pawn
     {{ 0,  0,  0,  0,  0}, {15, 15, 15, 15, 15}, { 4,  6, 10,  6,  4},
@@ -42,24 +36,78 @@ static const int pst[6][BOARD_H][BOARD_W] = {
      {-4, -4, -4, -4, -4}, { 4,  4,  0,  4,  4}, { 6,  6,  2,  6,  6}},
 };
 
-// King tropism weights
-static const int tropism_w[7] = {0, 0, 3, 3, 2, 5, 0};
+static constexpr int PAWN_ADVANCE_WEIGHT = 2;
+static constexpr int PROMO_ONE_STEP = 4;
+static constexpr int PROMO_TWO_STEP = 2;
+static constexpr int CENTER_BONUS = 1;
+static constexpr int KING_ATTACKER_PENALTY = 1;
 
-static int king_tropism(
-    int piece_type,
-    int pr, int pc,
-    int ekr, int ekc
-){
-    int dist = std::max(std::abs(pr - ekr), std::abs(pc - ekc));
-    if(dist <= 2){
-        return tropism_w[piece_type] * (3 - dist);
+static bool is_center_square(int row, int col){
+    return row >= 2 && row <= 3 && col >= 1 && col <= 3;
+}
+
+/* Row index of promotion rank for each player. */
+static int promo_rank(int side){
+    return (side == 0) ? 0 : (BOARD_H - 1);
+}
+
+/* Pawn start rank (one row inside the back rank). */
+static int pawn_start_rank(int side){
+    return (side == 0) ? (BOARD_H - 2) : 1;
+}
+
+static int pawn_squares_advanced(int side, int row){
+    if(side == 0){
+        return pawn_start_rank(0) - row;
+    }
+    return row - pawn_start_rank(1);
+}
+
+static int pawn_promotion_pressure(int side, int row){
+    int dist = std::abs(row - promo_rank(side));
+    if(dist == 1){
+        return PROMO_ONE_STEP;
+    }
+    if(dist == 2){
+        return PROMO_TWO_STEP;
     }
     return 0;
 }
 
+/* PST row for black mirrors white about the horizontal midline. */
+static int pst_value(int piece_type, int side, int row, int col){
+    int pst_row = (side == 0) ? row : (BOARD_H - 1 - row);
+    return pst[piece_type - 1][pst_row][col];
+}
+
+static int king_safety_penalty(
+    int king_row,
+    int king_col,
+    const char opp_board[BOARD_H][BOARD_W]
+){
+    if(king_row < 0){
+        return 0;
+    }
+    int penalty = 0;
+    for(int r = 0; r < BOARD_H; r++){
+        for(int c = 0; c < BOARD_W; c++){
+            int p = opp_board[r][c];
+            if(p < 1 || p > 5){
+                continue;
+            }
+            int dr = std::abs(r - king_row);
+            int dc = std::abs(c - king_col);
+            if(std::max(dr, dc) <= 1){
+                penalty += KING_ATTACKER_PENALTY;
+            }
+        }
+    }
+    return penalty;
+}
+
 
 /*============================================================
- * evaluate() — runtime-selectable eval strategy
+ * evaluate() — single-pass, leaf-friendly scoring
  *============================================================*/
 
 int State::evaluate(
@@ -67,132 +115,79 @@ int State::evaluate(
     bool use_mobility,
     const GameHistory* history
 ){
-    (void)history; // just to suppress warning
+    (void)history;
+    (void)use_mobility; /* mobility removed: opponent move gen was too costly */
 
-    // [ Hackathon TODO 1-1 ]
-    // if in win state, return max score(you can check base_state.hpp for max score)
-    if(win_state == WIN)
-    {
+    if(game_state == WIN){
         return P_MAX;
-    }    
-    auto self_board = this->board.board[this->player];
-    auto oppn_board = this->board.board[1 - this->player];
-    int self_score = 0, oppn_score = 0;
+    }
+
+    const int self = this->player;
+    const int opp = 1 - self;
+    auto self_board = this->board.board[self];
+    auto opp_board = this->board.board[opp];
+
+    int self_total = 0;
+    int opp_total = 0;
+    int self_kr = -1, self_kc = -1;
+    int opp_kr = -1, opp_kc = -1;
+
+    for(int r = 0; r < BOARD_H; r++){
+        for(int c = 0; c < BOARD_W; c++){
+            int sp = self_board[r][c];
+            if(sp >= 1 && sp <= 6){
+                self_total += PIECE_VALUES[sp];
+                if(sp == 6){
+                    self_kr = r;
+                    self_kc = c;
+                }
+                if(use_kp_eval){
+                    self_total += pst_value(sp, self, r, c);
+                    if(is_center_square(r, c)){
+                        self_total += CENTER_BONUS;
+                    }
+                    if(sp == 1){
+                        int adv = pawn_squares_advanced(self, r);
+                        if(adv > 0){
+                            self_total += PAWN_ADVANCE_WEIGHT * adv;
+                        }
+                        self_total += pawn_promotion_pressure(self, r);
+                    }
+                }
+            }
+
+            int op = opp_board[r][c];
+            if(op >= 1 && op <= 6){
+                opp_total += PIECE_VALUES[op];
+                if(op == 6){
+                    opp_kr = r;
+                    opp_kc = c;
+                }
+                if(use_kp_eval){
+                    opp_total += pst_value(op, opp, r, c);
+                    if(is_center_square(r, c)){
+                        opp_total += CENTER_BONUS;
+                    }
+                    if(op == 1){
+                        int adv = pawn_squares_advanced(opp, r);
+                        if(adv > 0){
+                            opp_total += PAWN_ADVANCE_WEIGHT * adv;
+                        }
+                        opp_total += pawn_promotion_pressure(opp, r);
+                    }
+                }
+            }
+        }
+    }
+
+    int score = self_total - opp_total;
 
     if(use_kp_eval){
-        /* === KP eval: material + PST + tropism === */
-
-        int self_kr = -1, self_kc = -1;
-        int oppn_kr = -1, oppn_kc = -1;
-        // [ Hackathon TODO 1-3 ]
-        // get the position for player's king and opponent's king
-        for(int i=0; i<BOARD_H; i++)
-        {
-            for(int j=0; j<BOARD_W; j++)
-            {
-                if(self_board[i][j] == 6)
-                {
-                    self_kr = i;
-                    self_kc = j;
-                }
-                if(oppn_board[i][j] == 6)
-                {
-                    oppn_kr = i;
-                    oppn_kc = j;
-                }
-            }
-        }
-
-
-        // [ Hackathon TODO 1-4 ]
-        // sum player/opponent pieces' value and add to score
-        // if enemy king is still on the board, you should also call king_tropism for your pieces and add the value to score
-        // king_tropism is already given above
-
-        //find both kings position
-        for(int i=0; i<BOARD_H; i++)
-        {
-            for(int j=0; j<BOARD_W; j++)
-            {
-                if(self_board[i][j] == 6)
-                {
-                    self_kr = i;
-                    self_kc = j;
-                }
-                if(oppn_board[i][j] == 6)
-                {
-                    oppn_kr = i;
-                    oppn_kc = j;
-                }
-            }
-        }
-
-        //evaluating self pieces
-        //loop thorugh all squares
-        //check if there is self pieces, add raw material value, add positional bonus, add king pressure(tropism)
-        for(int i=0; i<BOARD_H; i++)
-        {
-            for(int j=0; j<BOARD_W; j++)
-            {
-                if(self_board[i][j])
-                {
-                    self_score += kp_material[self_board[i][j]];
-                    self_score += pst[self_board[i][j]-1][i][j];
-
-                    if(oppn_kr != -1)
-                    {
-                        self_score += king_tropism(self_board[i][j], i, j, oppn_kr, oppn_kc);
-                    }
-
-                }
-            }
-        }
-
-
-    }
-    /* === Simple material-only eval === */
-
-        // [ Hackathon TODO 1-2 ]
-        // Simply add each piece's value to score
-    else
-    {
-        for(int i=0; i<BOARD_H; i++)
-        {
-            for(int j=0; j<BOARD_W; j++)
-            {
-                if(self_board[i][j])
-                {
-                    self_score += PIECE_VALUES[self_board[i][j]];
-                }
-            }
-        }
-        for(int i=0; i<BOARD_H; i++)
-        {
-            for(int j=0; j<BOARD_W; j++)
-            {
-                if(oppn_board[i][j])
-                {
-                    oppn_score += PIECE_VALUES[oppn_board[i][j]];
-                }
-            }
-        }
-
-    int bonus = 0;
-
-    /* === Mobility bonus === */
-    if(use_mobility){
-        // [ Hackathon TODO 1-5 ]
-        // you can calculate mobility by legal actions size
-        // bonus += 2 * (self_mobility - oppn_mobility);
-        int self_mobility = this->legal_actions.size();
-
-        State * opp_state = this->create_null_state();
-        int oppn_mobility = opp_state->legal_actions.size();
-        delete opp_state;
-        bonus += 2 * (self_mobility - oppn_mobility);
+        score -= king_safety_penalty(self_kr, self_kc, opp_board);
+        score += king_safety_penalty(opp_kr, opp_kc, self_board);
     }
 
-    return self_score - oppn_score + bonus;
+    return score;
 }
 
 
@@ -442,6 +437,7 @@ void State::get_legal_actions_naive(){
                                 return;
                             }
                         }
+                        break;
 
                     case 6: //king
                         for(auto move: move_table_king){

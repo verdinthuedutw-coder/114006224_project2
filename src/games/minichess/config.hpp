@@ -12,7 +12,7 @@
 #define MAX_STEP 100
 #define USE_BITBOARD
 
-/* MVV-LVA piece values for move ordering (indexed by piece type) */
+/* MVV-LVA piece values for eval + move ordering */
 static const int PIECE_VALUES[] = {
     0,   /* EMPTY=0 */
     10,  /* PAWN=1 */

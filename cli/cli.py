@@ -4,6 +4,7 @@ import argparse
 import os
 import subprocess
 import sys
+import threading
 import time
 
 from cli.games.minichess import get_context as _minichess_ctx
@@ -214,14 +215,39 @@ def get_engine_move(
         return bestmove, last_info
     else:
         send(f"go movetime {time_limit}")
-        # Wait exactly the time limit, then kill and read
-        time.sleep(time_limit / 1000.0)
-        proc.kill()
-        stdout = proc.stdout.read()
+        done = threading.Event()
+        lines_out: list[str] = []
 
-    # Parse killed output -- iterate from last to first for robustness
-    # (last line may be truncated by kill)
-    lines = stdout.decode("utf-8", errors="replace").splitlines()
+        def reader():
+            while not done.is_set():
+                raw = proc.stdout.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").strip()
+                lines_out.append(line)
+                if line.startswith("info ") and "depth" in line:
+                    nonlocal last_info
+                    last_info = _parse_info(line)
+                elif line.startswith("bestmove"):
+                    parts = line.split()
+                    nonlocal bestmove
+                    bestmove = parts[1] if len(parts) >= 2 else None
+                    done.set()
+                    break
+
+        t0 = time.time()
+        th = threading.Thread(target=reader, daemon=True)
+        th.start()
+        hard_cap = t0 + 30.0
+        while time.time() < hard_cap and not done.is_set():
+            time.sleep(0.01)
+        done.set()
+        proc.kill()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        lines = lines_out
     for line in reversed(lines):
         line = line.strip()
         if bestmove is None and line.startswith("bestmove"):

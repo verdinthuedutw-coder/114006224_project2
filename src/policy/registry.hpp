@@ -14,6 +14,9 @@
 #include "search_types.hpp"
 #include "game_history.hpp"
 #include "minimax.hpp"
+#include "alphabeta.hpp"
+#include "pvs.hpp"
+#include "submission.hpp"
 #include "random.hpp"
 
 struct AlgoEntry {
@@ -31,6 +34,30 @@ inline const std::vector<AlgoEntry>& get_algo_table(){
             MiniMax::param_defs(),
             [](State* s, int d, GameHistory& h, SearchContext& c){
                 return MiniMax::search(s, d, h, c);
+            }
+        },
+        {
+            "alphabeta",
+            AlphaBeta::default_params(),
+            AlphaBeta::param_defs(),
+            [](State* s, int d, GameHistory& h, SearchContext& c){
+                return AlphaBeta::search(s, d, h, c);
+            }
+        },
+        {
+            "pvs",
+            PVS::default_params(),
+            PVS::param_defs(),
+            [](State* s, int d, GameHistory& h, SearchContext& c){
+                return PVS::search(s, d, h, c);
+            }
+        },
+        {
+            "submission",
+            Submission::default_params(),
+            Submission::param_defs(),
+            [](State* s, int d, GameHistory& h, SearchContext& c){
+                return Submission::search(s, d, h, c);
             }
         },
         {
@@ -54,4 +81,4 @@ inline const AlgoEntry* find_algo(const std::string& name){
     return nullptr;
 }
 
-inline std::string default_algo_name(){ return "minimax"; }
+inline std::string default_algo_name(){ return "submission"; }
